@@ -18,6 +18,9 @@ jobs:
         
     steps: 
       - uses: actions/checkout@v3 
+        with:
+          fetch-depth: 50
+          submodules: true      
 
       - uses: actions/setup-python@v4 
         with: 
@@ -41,10 +44,13 @@ jobs:
   
   build_sdist:
     name: Build source distribution
-    runs-on: window-latest
+    runs-on: windows-latest
     
     steps:
       - uses: actions/checkout@v3
+        with:
+          fetch-depth: 50
+          submodules: true      
       
       - uses: actions/setup-python@v4 
         with: 
