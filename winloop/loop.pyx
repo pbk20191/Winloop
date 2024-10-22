@@ -50,11 +50,32 @@ include "includes/stdlib.pxi"
 
 include "errors.pyx"
 
+import ctypes
+_Tcl_SetServiceMode = None
+_Tcl_ServiceAll = None
+try:
+    if system.PLATFORM_IS_WINDOWS:
+        import tkinter, _tkinter
+        version = str(tkinter.TclVersion).replace('.','')
+        _tcl_dll = ctypes.CDLL(f"tcl{version}t.dll")
+        _Tcl_SetServiceMode = ctypes.CFUNCTYPE(ctypes.c_int, ctypes.c_int)(_tcl_dll.Tcl_SetServiceMode)
+        _Tcl_ServiceAll = ctypes.CFUNCTYPE(restype=None)(_tcl_dll.Tcl_ServiceAll)
+except:
+    pass
+
 cdef:
     int PY39 = PY_VERSION_HEX >= 0x03090000
     int PY311 = PY_VERSION_HEX >= 0x030b0000
     uint64_t MAX_SLEEP = 3600 * 24 * 365 * 100
 
+cdef _tcl_update(tcl):
+    if tcl is None:
+        return
+    while tcl.dooneevent(_tkinter.ALL_EVENTS | _tkinter.DONT_WAIT) != 0:
+        pass
+    _Tcl_SetServiceMode(1)
+    _Tcl_ServiceAll()
+    _Tcl_SetServiceMode(0)
 
 cdef _is_sock_stream(sock_type):
     if SOCK_NONBLOCK == -1:
@@ -199,7 +220,16 @@ cdef class Loop:
             new_MethodHandle(
                 self, "loop._exec_queued_writes",
                 <method_t>self._exec_queued_writes, None, self))
-
+        tcl = None
+        try:
+            if system.PLATFORM_IS_WINDOWS:
+                tcl = tkinter.Tcl()
+        except:
+            pass
+        self.handler_check_tcl = UVCheck.new(
+            self, 
+            new_MethodHandle(
+                self, "tcl.update", <method_t>_tcl_update, None, tcl))
         self._signals = set()
         self._ssock = self._csock = None
         self._signal_handlers = {}
@@ -488,6 +518,8 @@ cdef class Loop:
 
         if self._stopping:
             uv.uv_stop(self.uvloop)  # void
+ #       if self._tcl is not None:
+ #           self._tcl.update_idletasks()
 
     cdef _stop(self, exc):
         if exc is not None:
@@ -533,7 +565,9 @@ cdef class Loop:
 
         self.handler_check__exec_writes.start()
         self.handler_idle.start()
-
+        cdef UVCheck check_tcl
+        check_tcl = self.handler_check_tcl
+        check_tcl.start()
         self._setup_or_resume_signals()
 
         if aio_set_running_loop is not None:
@@ -546,7 +580,8 @@ cdef class Loop:
 
             self.handler_check__exec_writes.stop()
             self.handler_idle.stop()
-
+            check_tcl = self.handler_check_tcl
+            check_tcl.stop()
             self._pause_signals()
 
             self._thread_id = 0
@@ -587,6 +622,9 @@ cdef class Loop:
         self.handler_async._close()
         self.handler_idle._close()
         self.handler_check__exec_writes._close()
+        cdef UVCheck check_tcl
+        check_tcl = self.handler_check_tcl
+        check_tcl._close()
         __close_all_handles(self)
         self._shutdown_signals()
         # During this run there should be no open handles,
@@ -624,7 +662,7 @@ cdef class Loop:
         self.handler_async = None
         self.handler_idle = None
         self.handler_check__exec_writes = None
-
+        self.handler_check_tcl = None
         self._executor_shutdown_called = True
         executor = self._default_executor
         if executor is not None:
@@ -663,6 +701,8 @@ cdef class Loop:
         if self.handler_check__exec_writes.running:
             if len(self._queued_streams) == 0:
                 self.handler_check__exec_writes.stop()
+        # if self._tcl is not None:
+        #     self._tcl.dooneevent(2)
 
     cdef inline _call_soon(self, object callback, object args, object context):
         cdef Handle handle
